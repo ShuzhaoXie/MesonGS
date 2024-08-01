@@ -118,12 +118,9 @@ You can download a sample checkpoint of `mic` scene from [here [68 MB]](https://
     │   ├── mic
     │   ├── README.txt
     │   └── ship
-    ├── tandt
-    │   ├── train
-    │   └── truck
-    └── tandt_db
-        ├── db
-        └── tandt
+    └── tandt
+        ├── train
+        └── truck
     ```
 
 ## 3. Running
