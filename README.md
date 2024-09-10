@@ -175,12 +175,12 @@ python render.py -s $DATADIR/nerf_synthetic/$SCENENAME \
   </div>
 </section>
 
-## 4. TODO
+## 5. TODO
 - [ ] Upload the version that configed by number of blocks instead of the length.
 
-## 5. Contributions
+## 6. Contributions
 Some source code of ours is borrowed from [3DGS](https://github.com/graphdeco-inria/gaussian-splatting), [3DAC](https://github.com/fatPeter/ThreeDAC), [c3dgs](https://github.com/KeKsBoTer/c3dgs), [LightGuassian](https://github.com/VITA-Group/LightGaussian), and [ACRF](https://github.com/fatPeter/ACRF). We sincerely appreciate the excellent works of these authors.
 
-## 6. Funding and Acknowledgments
+## 7. Funding and Acknowledgments
 
 This work is supported in part by National Key Research and Development Project of China (Grant No. 2023YFF0905502) and Shenzhen Science and Technology Program (Grant No. JCYJ20220818101014030). We thank anonymous reviewers for their valuable advice and [JiangXingAI](https://www.jiangxingai.com/) for sponsoring the research.
