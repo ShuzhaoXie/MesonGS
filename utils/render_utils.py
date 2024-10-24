@@ -201,7 +201,7 @@ def load_img(pth: str) -> np.ndarray:
   return image
 
 
-def create_videos(base_dir, input_dir, out_name, num_frames=480):
+def create_color_videos(base_dir, input_dir, out_name, num_frames=480):
   """Creates videos out of the images saved to disk."""
   # Last two parts of checkpoint path are experiment name and scene name.
   video_prefix = f'{out_name}'
@@ -212,13 +212,14 @@ def create_videos(base_dir, input_dir, out_name, num_frames=480):
   os.makedirs(base_dir, exist_ok=True)
   render_dist_curve_fn = np.log
   
+  color_file = os.path.join(input_dir, '00000.png')
   # Load one example frame to get image shape and depth range.
-  depth_file = os.path.join(input_dir, 'vis', f'depth_{idx_to_str(0)}.tiff')
-  depth_frame = load_img(depth_file)
-  shape = depth_frame.shape
-  p = 3
-  distance_limits = np.percentile(depth_frame.flatten(), [p, 100 - p])
-  lo, hi = [render_dist_curve_fn(x) for x in distance_limits]
+  # depth_file = os.path.join(input_dir, 'vis', f'depth_{idx_to_str(0)}.tiff')
+  color_frame = load_img(color_file)
+  shape = color_frame.shape
+  # p = 3
+  # distance_limits = np.percentile(color_frame.flatten(), [p, 100 - p])
+  # lo, hi = [render_dist_curve_fn(x) for x in distance_limits]
   print(f'Video shape is {shape[:2]}')
 
   video_kwargs = {
@@ -228,7 +229,7 @@ def create_videos(base_dir, input_dir, out_name, num_frames=480):
       'crf': 18,
   }
   
-  for k in ['depth', 'normal', 'color']:
+  for k in ['color']:
     video_file = os.path.join(base_dir, f'{video_prefix}_{k}.mp4')
     input_format = 'gray' if k == 'alpha' else 'rgb'
     
@@ -237,7 +238,7 @@ def create_videos(base_dir, input_dir, out_name, num_frames=480):
     idx = 0
 
     if k == 'color':
-      file0 = os.path.join(input_dir, 'renders', f'{idx_to_str(0)}.{file_ext}')
+      file0 = os.path.join(input_dir, f'{idx_to_str(0)}.{file_ext}')
     else:
       file0 = os.path.join(input_dir, 'vis', f'{k}_{idx_to_str(0)}.{file_ext}')
 
@@ -250,19 +251,19 @@ def create_videos(base_dir, input_dir, out_name, num_frames=480):
       for idx in tqdm(range(num_frames)):
         # img_file = os.path.join(input_dir, f'{k}_{idx_to_str(idx)}.{file_ext}')
         if k == 'color':
-          img_file = os.path.join(input_dir, 'renders', f'{idx_to_str(idx)}.{file_ext}')
-        else:
-          img_file = os.path.join(input_dir, 'vis', f'{k}_{idx_to_str(idx)}.{file_ext}')
+          img_file = os.path.join(input_dir, f'{idx_to_str(idx)}.{file_ext}')
+        # else:
+        #   img_file = os.path.join(input_dir, 'vis', f'{k}_{idx_to_str(idx)}.{file_ext}')
 
         if not os.path.exists(img_file):
           ValueError(f'Image file {img_file} does not exist.')
         img = load_img(img_file)
         if k in ['color', 'normal']:
           img = img / 255.
-        elif k.startswith('depth'):
-          img = render_dist_curve_fn(img)
-          img = np.clip((img - np.minimum(lo, hi)) / np.abs(hi - lo), 0, 1)
-          img = cm.get_cmap('turbo')(img)[..., :3]
+        # elif k.startswith('depth'):
+        #   img = render_dist_curve_fn(img)
+        #   img = np.clip((img - np.minimum(lo, hi)) / np.abs(hi - lo), 0, 1)
+        #   img = cm.get_cmap('turbo')(img)[..., :3]
 
         frame = (np.clip(np.nan_to_num(img), 0., 1.) * 255.).astype(np.uint8)
         writer.add_image(frame)

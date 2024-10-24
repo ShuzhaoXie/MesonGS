@@ -52,7 +52,7 @@ CUDA 11.6/11.8, GPU 3090/4090/V100:
 sudo apt install zip unzip
 conda env create --file environment.yml
 conda activate mesongs
-pip install plyfile tqdm einops scipy open3d trimesh Ninja seaborn loguru pandas torch_scatter
+pip install plyfile tqdm einops scipy open3d trimesh Ninja seaborn loguru pandas torch_scatter mediapy
 ```
 
 CUDA 12.1/12.4, GPU 3090/4090:
@@ -62,7 +62,7 @@ sudo apt install zip unzip
 conda create -n mesongs python=3.10
 conda activate mesongs
 pip install torchaudio==2.1.0+cu121 torchvision==0.16.0+cu121 --index-url https://download.pytorch.org/whl/cu121
-pip install plyfile tqdm einops scipy open3d trimesh Ninja seaborn loguru pandas torch_scatter
+pip install plyfile tqdm einops scipy open3d trimesh Ninja seaborn loguru pandas torch_scatter mediapy
 pip install submodules/diff-gaussian-rasterization
 pip install submodules/simple-knn
 pip install submodules/weighted_distance
@@ -99,12 +99,12 @@ You can download a sample checkpoint of `mic` scene from [here [68 MB]](https://
     │   ├── bicycle
     │   ├── bonsai
     │   ├── counter
-    │   ├── flowers.txt
+    │   ├── flowers
     │   ├── garden
     │   ├── kitchen
     │   ├── room
     │   ├── stump
-    │   └── treehill.txt
+    │   └── treehill
     ├── db
     │   ├── drjohnson
     │   └── playroom
@@ -128,15 +128,7 @@ You can download a sample checkpoint of `mic` scene from [here [68 MB]](https://
 To run the MesonGS, using:
 
 ```bash
-SCENENAME=mic
-
-CUDA_VISIBLE_DEVICES=0 python mesongs.py -s data/nerf_synthetic/$SCENENAME \
-    --given_ply_path output/$SCENENAME/point_cloud/iteration_30000/point_cloud.ply \
-    -w --eval \
-    --iteration 10 \
-    --scene_name $SCENENAME \
-    --csv_path exp_data/csv/meson_$SCENENAME.csv \
-    --model_path output/meson_$SCENENAME
+bash scripts/mesongs_block.sh
 ```
 
 * Set `--iteration` to `0` for compression without finetuning. 
@@ -161,22 +153,30 @@ python render.py -s $DATADIR/nerf_synthetic/$SCENENAME \
     --model_path $MAINDIR/output/$CKPT
 ```
 
+### 3.2 Evaluation and Comparison
+Please consider using the [`c1`](configs/c1.json) and [`c3`](configs/c3.json) configs. You can find the corresponding evaluation results at the [`results`](results/) directory. 
+We also share these results with the [3DGS compression survey](https://w-m.github.io/3dgs-compression-survey/). This survey is wonderful and presents lots of baselines.
+
 <section class="section" id="BibTeX">
   <div class="container is-max-desktop content">
     <h2 class="title">4. BibTeX</h2>
-    <pre><code>@inproceedings{xie2024mesongs,
-    title={MesonGS: Post-training Compression of 3D Gaussians via Efficient Attribute Transformation},
-    author={Xie, Shuzhao and Zhang, Weixiang and Tang, Chen and Bai, Yunpeng and Lu, Rongwei and Ge, Shijia and Wang, Zhi},
-    booktitle={European Conference on Computer Vision},
-    year={2024},
-    organization={Springer}
-}
-</code></pre>
+    <pre>
+    <code>@inproceedings{xie2024mesongs,
+        title={MesonGS: Post-training Compression of 3D Gaussians via Efficient Attribute Transformation},
+        author={Xie, Shuzhao and Zhang, Weixiang and Tang, Chen and Bai, Yunpeng and Lu, Rongwei and Ge, Shijia and Wang, Zhi},
+        booktitle={European Conference on Computer Vision},
+        year={2024},
+        organization={Springer}
+    }
+    </code>
+    </pre>   
   </div>
 </section>
 
+
+
 ## 5. TODO
-- [ ] Upload the version that configed by number of blocks instead of the length.
+- [x] Upload the version that configed by number of blocks instead of the length.
 
 ## 6. Contributions
 Some source code of ours is borrowed from [3DGS](https://github.com/graphdeco-inria/gaussian-splatting), [3DAC](https://github.com/fatPeter/ThreeDAC), [c3dgs](https://github.com/KeKsBoTer/c3dgs), [LightGuassian](https://github.com/VITA-Group/LightGaussian), and [ACRF](https://github.com/fatPeter/ACRF). We sincerely appreciate the excellent works of these authors.

@@ -34,6 +34,7 @@ class Scene:
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
+        self.codeft = args.codeft
         
         
         if given_ply_path == '' or given_ply_path == None:
@@ -112,10 +113,15 @@ class Scene:
         
         return point_cloud_path
 
-    def save_ft(self, iteration):
+    def save_ft(self, iteration, pipe, per_channel_quant=False, per_block_quant=False):
         pc_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         print('save_npz gaussians:', pc_path)
-        self.gaussians.save_npz(os.path.join(pc_path, "pc_npz"))
+        # self.gaussians.save_ft_ply(os.path.join(pc_path, "point_cloud.ply"))
+        if pipe.save_ft_type == 'full_npz':
+            print('save_npz gaussians:', pc_path)
+            self.gaussians.save_full_npz(os.path.join(pc_path, "pc_npz"), pipe, per_channel_quant=per_channel_quant, per_block_quant=per_block_quant)
+        else:
+            self.gaussians.save_npz(os.path.join(pc_path, "pc_npz"), pipe, per_channel_quant=per_channel_quant, per_block_quant=per_block_quant)
         return os.path.getsize(os.path.join(pc_path, "pc_npz", "bins.zip"))
         
     def getTrainCameras(self, scale=1.0):

@@ -21,6 +21,7 @@ from torch.autograd import Function
 from raht_torch import itransform_batched_torch, transform_batched_torch
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
+from utils.quant_utils import split_length
 
 
 def ToEulerAngles_FT(q, save=False):
@@ -153,8 +154,14 @@ def render(viewpoint_camera,
             shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
             dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+            # print('shs_view', shs_view.max(), shs_view.min())
+            # print('active_sh_degree', pc.active_sh_degree)
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
+            # print('sh2rgb.max(), sh2rgb.min()', sh2rgb.max(), sh2rgb.min())
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
+            # colors_precomp = colors_precomp.nan_to_num(0)
+            # colors_precomp = 
+            # print('colors_precomp', colors_precomp.max(), colors_precomp.min(), colors_precomp[:5])
         else:
             shs = pc.get_features
     else:
@@ -240,6 +247,17 @@ def seg_quant(x, lseg, qas):
         cnt+=1
     return torch.concat(outs, dim=0)
 
+def seg_quant_ave(x, split, qas):
+    start = 0
+    cnt = 0
+    outs = []
+    for length in split:
+        outs.append(qas[cnt](x[start:start+length]))
+        cnt += 1
+        start += length
+    return torch.concat(outs, dim=0)
+
+
 def ft_render(
         viewpoint_camera, 
         pc : GaussianModel, 
@@ -249,6 +267,8 @@ def ft_render(
         scaling_modifier = 1.0, 
         override_color = None, 
         raht=False, 
+        per_channel_quant=False,
+        per_block_quant=False,
         debug=False,
         clamp_color=True,
         ):
@@ -291,6 +311,22 @@ def ft_render(
     
     rasterizer = GaussianRasterizerIndexed(raster_settings=raster_settings)
     
+    # if training:
+    #     if pipe.train_mode == 'rot':
+    #         re_mode = 'rot'
+    #     elif pipe.train_mode == 'euler':
+    #         re_mode = 'euler'
+    # else:
+    #     if pipe.test_mode == 'rot':
+    #         re_mode = 'rot'
+    #     elif pipe.test_mode == 'euler':
+    #         re_mode = 'euler'
+    
+    
+    # if re_mode == 'rot':
+    #     re_range = [1, 5]
+    #     shzero_range = [5, 8]
+    # elif re_mode == 'euler':
     re_range = [1, 4]
     shzero_range = [4, 7]
     
@@ -323,16 +359,19 @@ def ft_render(
         
         quantC = torch.zeros_like(C)
         quantC[0] = C[0]
-        qa_cnt = 0
-        lc1 = C.shape[0] - 1
-        if lc1 % pc.lseg == 0:
-            blocks_in_channel = lc1 // pc.lseg
+        if per_channel_quant:
+            for i in range(C.shape[-1]):
+                quantC[1:, i] = pc.qas[i](C[1:, i])
+        elif per_block_quant:
+            qa_cnt = 0
+            lc1 = C.shape[0] - 1
+            split_ac = split_length(lc1, pc.n_block)
+            for i in range(C.shape[-1]):
+                quantC[1:, i] = seg_quant_ave(C[1:, i], split_ac, pc.qas[qa_cnt : qa_cnt + pc.n_block])
+                qa_cnt += pc.n_block
+            
         else:
-            blocks_in_channel = lc1 // pc.lseg + 1
-        
-        for i in range(C.shape[-1]):
-            quantC[1:, i] = seg_quant(C[1:, i], pc.lseg, pc.qas[qa_cnt : qa_cnt + blocks_in_channel])
-            qa_cnt += blocks_in_channel
+            quantC[1:] = pc.qa(C[1:])
 
         res_inv = pc.res_inv
         pos = res_inv['pos']
@@ -374,19 +413,28 @@ def ft_render(
         
         scales = pc.get_ori_scaling
         
-        lc1 = scales.shape[0]
-        scalesq = torch.zeros_like(scales).cuda()
-        if lc1 % pc.lseg == 0:
-            blocks_in_channel = lc1 // pc.lseg
-        else:
-            blocks_in_channel = lc1 // pc.lseg + 1
-        for i in range(scales.shape[-1]):
-            scalesq[:, i] = seg_quant(scales[:, i], pc.lseg, pc.qas[qa_cnt : qa_cnt + blocks_in_channel])
-            qa_cnt += blocks_in_channel
+        if per_channel_quant:
+            scalesq = torch.zeros_like(scales).cuda()
+            scaleqa_offset = 7
+            for i in range(scaleqa_offset, scaleqa_offset + 3):
+                scalesq[:, i-scaleqa_offset] = pc.qas[i](scales[:, i-scaleqa_offset])
 
+        elif per_block_quant:
+            scalesq = torch.zeros_like(scales).cuda()
+            split_scale = split_length(scales.shape[0], pc.n_block)
+            for i in range(scales.shape[-1]):
+                # scalesq[:, i] = seg_quant(scales[:, i], pc.lseg, pc.qas[qa_cnt : qa_cnt + blocks_in_channel])
+                scalesq[:, i] = seg_quant_ave(scales[:, i], split_scale, pc.qas[qa_cnt: qa_cnt + pc.n_block])
+                qa_cnt += pc.n_block
+        else:
+            scalesq = pc.scale_qa(scales)
                 
         scaling = torch.exp(scalesq)
         
+        # if re_mode == 'rot':
+        #     rotations = raht_features[:, 1:5]
+        #     cov3D_precomp = pc.covariance_activation(scaling, 1.0, rotations)
+        # elif re_mode == 'euler':
         eulers = raht_features[:, 1:4]
         cov3D_precomp = pc.covariance_activation_for_euler(scaling, 1.0, eulers)
 
@@ -414,7 +462,7 @@ def ft_render(
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
     else:
-        raise Exception("Sorry, w/o raht version is unsupported.")
+        raise Exception("Sorry, w/o raht version is unimplemented.")
         
     rendered_image, radii = rasterizer(
         means3D = means3D,

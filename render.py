@@ -26,9 +26,26 @@ from utils.general_utils import safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import ssim
 from utils.system_utils import MAIN_DIR
+from utils.render_utils import generate_path, create_color_videos
 
+def render_video(model_path, name, scene, pipeline, gaussians, background, render_args):
+    n_fames = 480
+    cam_traj = generate_path(scene.getTrainCameras(), n_frames=n_fames)
+    makedirs(os.path.join(model_path, name, render_args.save_dir_name), exist_ok=True)
+    render_path = os.path.join(model_path, name, render_args.save_dir_name, "renders")    
+    makedirs(render_path, exist_ok=True)
+    for idx, cam in enumerate(tqdm(cam_traj, desc="Rendering progress")):
+        render_results = render(cam, gaussians, pipeline, background, debug=render_args.debug, clamp_color=True)
+        rendering = render_results["render"]
+        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+    
+    create_color_videos(base_dir=render_args.video_dir,
+            input_dir=render_path, 
+            out_name='test1', 
+            num_frames=n_fames)
+    
 
-def render_set(model_path, name, views, gaussians, pipeline, background, render_args):
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, render_args):
     makedirs(os.path.join(model_path, name, render_args.save_dir_name), exist_ok=True)
     render_path = os.path.join(model_path, name, render_args.save_dir_name, "renders")    
     gts_path = os.path.join(model_path, name, render_args.save_dir_name, "gt")
@@ -66,7 +83,8 @@ def render_set(model_path, name, views, gaussians, pipeline, background, render_
     print("")
     return psnr_val.item(), ssim_val.item(), lpips_val.item()
 
-    
+
+
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, render_args):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
@@ -82,18 +100,22 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         metric_vals = []
+        
+        if render_args.render_video:
+            render_video(dataset.model_path, 'train', scene, pipeline, gaussians, background, render_args)
+            
         if not render_args.skip_train:
-            psnrv, ssimv, lpipsv = render_set(dataset.model_path, "train", scene.getTrainCameras(), gaussians, pipeline, background, render_args)
+            psnrv, ssimv, lpipsv = render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, render_args)
             metric_vals.extend([psnrv, ssimv, lpipsv])
         else:
             metric_vals.extend([0, 0, 0])
 
         if not render_args.skip_test:
-            psnrv, ssimv, lpipsv = render_set(dataset.model_path, "test", scene.getTestCameras(), gaussians, pipeline, background, render_args)
+            psnrv, ssimv, lpipsv = render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, render_args)
             metric_vals.extend([psnrv, ssimv, lpipsv])
         else:
             metric_vals.extend([0, 0, 0])
-
+        
         return metric_vals
 
 if __name__ == "__main__":
@@ -106,7 +128,7 @@ if __name__ == "__main__":
     # parser.add_argument("--num_bits", default=32, type=int)
     parser.add_argument("--given_ply_path", default='', type=str)
     parser.add_argument("--save_dir_name", default='', type=str)
-    # parser.add_argument("--scene_name", default='', type=str)                                                                    
+    parser.add_argument("--scene_name", default='', type=str)                                                                    
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
@@ -114,7 +136,9 @@ if __name__ == "__main__":
     parser.add_argument("--dec_cov", action="store_true")
     parser.add_argument("--dec_euler", action="store_true")
     parser.add_argument("--dec_npz", action="store_true")
+    parser.add_argument("--render_video", action="store_true")
     parser.add_argument("--log_name", default='', type=str)
+    parser.add_argument("--video_dir", default='', type=str)
     parser.add_argument("--quick", action="store_true")
     # args = get_combined_args(parser)
     args = get_combined_args_render(parser)
@@ -126,7 +150,7 @@ if __name__ == "__main__":
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
-
+    
     csv_path = os.path.join(f'{MAIN_DIR}/exp_data/csv', args.log_name + '.csv')
     
     if not os.path.exists(f'{MAIN_DIR}/exp_data/csv'):
@@ -141,20 +165,23 @@ if __name__ == "__main__":
     if not os.path.exists(f'{MAIN_DIR}/exp_data/txt'):
         makedirs(f'{MAIN_DIR}/exp_data/txt')
     
-    dataset = model.extract(args)
-    pipe = pipeline.extract(args)
-    
+    print(model.extract(args))
     metric_vals = render_sets(
-        dataset, 
+        model.extract(args), 
         args.iteration, 
-        pipe, 
+        pipeline.extract(args), 
         render_args,) 
     
+    # if args.render_video:
+    #     render_video(
+    #         model.extract(args),
+            
+    #     )
     source_path = model.extract(args).source_path
     source_name = source_path.split('/')[-1]
     cur_time = strftime("%Y_%m_%d_%H_%M_%S", gmtime())
     row = []
-    row.append(pipe.scene_name + '_' + args.save_dir_name)
+    row.append(args.scene_name + '_' + args.save_dir_name)
     f = open(csv_path, 'a+')
     wtr = csv.writer(f)
     row.extend(metric_vals)

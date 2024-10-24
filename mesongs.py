@@ -117,7 +117,7 @@ def cal_imp(
     full_opa_imp = None 
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        render_results = render(view, gaussians, pipeline, background, debug=False, clamp_color=True, meson_count=True, f_count=False, depth_count=False)
+        render_results = render(view, gaussians, pipeline, background, debug=True, clamp_color=True, meson_count=True, f_count=False, depth_count=False)
         if full_opa_imp is not None:
             full_opa_imp += render_results["imp"]
         else:
@@ -127,7 +127,7 @@ def cal_imp(
         
     volume = torch.prod(gaussians.get_scaling, dim=1)
 
-    v_list = pre_volume(volume, beta_list.get(pipeline.scene_name, 0.1))
+    v_list = pre_volume(volume, beta_list.get(pipeline.scene_imp, 0.1))
     imp = v_list * full_opa_imp
     
     return imp.detach()
@@ -155,13 +155,508 @@ lr_scale_list = {
     'kitchen': 0.1,
     'room': 0.1,
     'stump': 0.01,
+    'flowers': 0.05,
+    'treehill': 0.05,
     'drjohnson': 0.1,
     'playroom': 0.1,
     'train': 0.05,
     'truck': 0.2
 }
 
-def evaluate_test(scene, dataset, pipe, background, iteration=0, skip_post_eval=False):
+
+universal_config = {
+    # 'lseg': {
+    #     'chair': 4000,
+    #     'drums': 4000,
+    #     'ficus': 4000,
+    #     'hotdog': 2000,
+    #     'lego': 2000,
+    #     'materials': 200,
+    #     'mic': 4000,
+    #     'ship': 2000,
+    #     'bicycle': 20000,
+    #     'bonsai': 20000,
+    #     'counter': 5000,
+    #     'garden': 20000,
+    #     'kitchen': 1000,
+    #     'room': 20000,
+    #     'stump': 20000,
+    #     'drjohnson': 20000,
+    #     'playroom': 20000,
+    #     'truck': 25000,
+    #     'train': 3000
+    # },
+    'n_block': {
+        'bicycle' : 66,
+        'bonsai' : 66,
+        'counter' : 66,
+        'garden' : 66,
+        'kitchen' : 66,
+        'room': 66,
+        'stump': 66,
+        'flowers': 66,
+        'treehill': 66,
+        'drjohnson': 66,
+        'playroom': 66,
+        'train': 66,
+        'truck': 66,
+        'chair': 62,
+        'drums': 66,
+        'ficus': 50,
+        'hotdog': 66,
+        'lego': 66,
+        'materials': 66,
+        'mic': 52,
+        'ship': 66
+    },
+    'cb': {
+        'chair': 2048,
+        'drums': 2048,
+        'ficus': 2048,
+        'hotdog': 4096,
+        'lego': 4096,
+        'materials': 4096,
+        'mic': 2048,
+        'ship': 8192,
+        'bicycle': 2048,
+        'bonsai': 2048,
+        'counter': 2048,
+        'garden': 2048,
+        'kitchen': 8192,
+        'room': 2048,
+        'stump': 2048,
+        'flowers': 2048,
+        'treehill': 2048,
+        'drjohnson': 2048,
+        'playroom': 2048,
+        'train': 4096,
+        'truck': 4096
+    },
+    'depth': {
+        'chair': 14,
+        'drums': 14,
+        'ficus': 14,
+        'hotdog': 14,
+        'lego': 14,
+        'materials': 14,
+        'mic': 14,
+        'ship': 14,
+        'bicycle': 20,
+        'bonsai': 19,
+        'counter': 19,
+        'garden': 20,
+        'kitchen': 19,
+        'room': 19,
+        'stump': 20,
+        'flowers': 20,
+        'treehill': 20,
+        'drjohnson': 20,
+        'playroom': 20,
+        'train': 20,
+        'truck': 20
+    },
+    'prune':  {
+        'chair': 0.06,
+        'drums': 0.18,
+        'ficus': 0.28,
+        'hotdog':  0.32,
+        'lego': 0.1,
+        'materials': 0.1,
+        'mic': 0.3,
+        'ship': 0.18,
+        'bicycle': 0.3,
+        'bonsai': 0.24,
+        'counter': 0.12,
+        'garden': 0.18,
+        'kitchen': 0.14,
+        'room': 0.22,
+        'stump': 0.2,
+        'flowers': 0.2,
+        'treehill': 0.2,
+        'drjohnson': 0.41,
+        'playroom': 0.0,
+        'train': 0.12,
+        'truck': 0.38
+    }
+}
+
+config2 = {
+    # 'lseg': {
+    #     'chair': 4000,
+    #     'drums': 4000,
+    #     'ficus': 4000,
+    #     'hotdog': 2000,
+    #     'lego': 2000,
+    #     'materials': 200,
+    #     'mic': 4000,
+    #     'ship': 2000,
+    #     'bicycle': 20000,
+    #     'bonsai': 20000,
+    #     'counter': 5000,
+    #     'garden': 20000,
+    #     'kitchen': 1000,
+    #     'room': 20000,
+    #     'stump': 20000,
+    #     'drjohnson': 20000,
+    #     'playroom': 20000,
+    #     'truck': 25000,
+    #     'train': 3000
+    # },
+    'n_block': {
+        'bicycle' : 50,
+        'bonsai' : 50,
+        'counter' : 50,
+        'garden' : 50,
+        'kitchen' : 50,
+        'room': 50,
+        'stump': 50,
+        'flowers': 50,
+        'treehill': 50,
+        'drjohnson': 50,
+        'playroom': 50,
+        'train': 50,
+        'truck': 50,
+        'chair': 48,
+        'drums': 50,
+        'ficus': 50,
+        'hotdog': 50,
+        'lego': 50,
+        'materials': 50,
+        'mic': 42,
+        'ship': 50
+    },
+    'cb': {
+        'chair': 2048,
+        'drums': 2048,
+        'ficus': 2048,
+        'hotdog': 4096,
+        'lego': 4096,
+        'materials': 4096,
+        'mic': 2048,
+        'ship': 8192,
+        'bicycle': 2048,
+        'bonsai': 2048,
+        'counter': 2048,
+        'garden': 2048,
+        'kitchen': 8192,
+        'room': 2048,
+        'stump': 2048,
+        'flowers': 2048,
+        'treehill': 2048,
+        'drjohnson': 2048,
+        'playroom': 2048,
+        'train': 4096,
+        'truck': 4096
+    },
+    'depth': {
+        'chair': 14,
+        'drums': 14,
+        'ficus': 14,
+        'hotdog': 14,
+        'lego': 14,
+        'materials': 14,
+        'mic': 14,
+        'ship': 14,
+        'bicycle': 20,
+        'bonsai': 19,
+        'counter': 19,
+        'garden': 20,
+        'kitchen': 19,
+        'room': 19,
+        'stump': 20,
+        'flowers': 20,
+        'treehill': 20,
+        'drjohnson': 20,
+        'playroom': 20,
+        'train': 20,
+        'truck': 20
+    },
+    'prune':  {
+        'chair': 0.06,
+        'drums': 0.18,
+        'ficus': 0.28,
+        'hotdog':  0.32,
+        'lego': 0.1,
+        'materials': 0.1,
+        'mic': 0.3,
+        'ship': 0.18,
+        'bicycle': 0.3,
+        'bonsai': 0.24,
+        'counter': 0.12,
+        'garden': 0.18,
+        'kitchen': 0.14,
+        'room': 0.22,
+        'stump': 0.2,
+        'flowers': 0.45,
+        'treehill': 0.45,
+        'drjohnson': 0.41,
+        'playroom': 0.0,
+        'train': 0.12,
+        'truck': 0.38
+    }
+}
+
+
+# config3 = {
+#     'n_block': {
+#         'bicycle' : 57,
+#         'bonsai' : 57,
+#         'counter' : 57,
+#         'garden' : 57,
+#         'kitchen' : 57,
+#         'room': 57,
+#         'stump': 57,
+#         'flowers': 57,
+#         'treehill': 57,
+#         'drjohnson': 57,
+#         'playroom': 57,
+#         'train': 57,
+#         'truck': 57,
+#         'chair': 52,
+#         'drums': 57,
+#         'ficus': 57,
+#         'hotdog': 57,
+#         'lego': 57,
+#         'materials': 57,
+#         'mic': 48,
+#         'ship': 57
+#     },
+#     'cb': {
+#         'chair': 2048,
+#         'drums': 2048,
+#         'ficus': 2048,
+#         'hotdog': 4096,
+#         'lego': 4096,
+#         'materials': 4096,
+#         'mic': 2048,
+#         'ship': 8192,
+#         'bicycle': 2048,
+#         'bonsai': 2048,
+#         'counter': 2048,
+#         'garden': 2048,
+#         'kitchen': 8192,
+#         'room': 2048,
+#         'stump': 2048,
+#         'flowers': 2048,
+#         'treehill': 2048,
+#         'drjohnson': 2048,
+#         'playroom': 2048,
+#         'train': 4096,
+#         'truck': 4096
+#     },
+#     'depth': {
+#         'chair': 14,
+#         'drums': 14,
+#         'ficus': 14,
+#         'hotdog': 14,
+#         'lego': 14,
+#         'materials': 14,
+#         'mic': 14,
+#         'ship': 14,
+#         'bicycle': 20,
+#         'bonsai': 19,
+#         'counter': 19,
+#         'garden': 20,
+#         'kitchen': 19,
+#         'room': 19,
+#         'stump': 20,
+#         'flowers': 20,
+#         'treehill': 20,
+#         'drjohnson': 20,
+#         'playroom': 20,
+#         'train': 20,
+#         'truck': 20
+#     },
+#     'prune':  {
+#         'chair': 0.16,
+#         'drums': 0.28,
+#         'ficus': 0.38,
+#         'hotdog':  0.42,
+#         'lego': 0.2,
+#         'materials': 0.2,
+#         'mic': 0.4,
+#         'ship': 0.28,
+#         'bicycle': 0.4,
+#         'bonsai': 0.34,
+#         'counter': 0.22,
+#         'garden': 0.28,
+#         'kitchen': 0.24,
+#         'room': 0.32,
+#         'stump': 0.3,
+#         'flowers': 0.5,
+#         'treehill': 0.5,
+#         'drjohnson': 0.41,
+#         'playroom': 0.2,
+#         'train': 0.22,
+#         'truck': 0.4
+#     }
+# }
+
+config3 = {
+    'n_block': {
+        'bicycle' : 57,
+        'bonsai' : 57,
+        'counter' : 57,
+        'garden' : 57,
+        'kitchen' : 57,
+        'room': 57,
+        'stump': 57,
+        'flowers': 57,
+        'treehill': 57,
+        'drjohnson': 57,
+        'playroom': 57,
+        'train': 57,
+        'truck': 57,
+        'chair': 52,
+        'drums': 57,
+        'ficus': 57,
+        'hotdog': 57,
+        'lego': 57,
+        'materials': 57,
+        'mic': 48,
+        'ship': 57
+    },
+    'cb': {
+        'chair': 2048,
+        'drums': 2048,
+        'ficus': 2048,
+        'hotdog': 4096,
+        'lego': 4096,
+        'materials': 4096,
+        'mic': 2048,
+        'ship': 8192,
+        'bicycle': 2048,
+        'bonsai': 2048,
+        'counter': 2048,
+        'garden': 2048,
+        'kitchen': 8192,
+        'room': 2048,
+        'stump': 2048,
+        'flowers': 2048,
+        'treehill': 2048,
+        'drjohnson': 2048,
+        'playroom': 2048,
+        'train': 4096,
+        'truck': 4096
+    },
+    'depth': {
+        'chair': 14,
+        'drums': 14,
+        'ficus': 14,
+        'hotdog': 14,
+        'lego': 14,
+        'materials': 14,
+        'mic': 14,
+        'ship': 14,
+        'bicycle': 20,
+        'bonsai': 19,
+        'counter': 19,
+        'garden': 20,
+        'kitchen': 19,
+        'room': 19,
+        'stump': 20,
+        'flowers': 20,
+        'treehill': 20,
+        'drjohnson': 20,
+        'playroom': 20,
+        'train': 20,
+        'truck': 20
+    },
+    'prune':  {
+        'chair': 0.16,
+        'drums': 0.28,
+        'ficus': 0.38,
+        'hotdog':  0.42,
+        'lego': 0.2,
+        'materials': 0.2,
+        'mic': 0.4,
+        'ship': 0.28,
+        'bicycle': 0.4,
+        'bonsai': 0.34,
+        'counter': 0.22,
+        'garden': 0.28,
+        'kitchen': 0.24,
+        'room': 0.32,
+        'stump': 0.3,
+        'flowers': 0.5,
+        'treehill': 0.5,
+        'drjohnson': 0.41,
+        'playroom': 0.2,
+        'train': 0.22,
+        'truck': 0.4
+    }
+}
+
+
+# 'prune':  {
+#         'chair': 0.06,
+#         'drums': 0.18,
+#         'ficus': 0.28,
+#         'hotdog':  0.32,
+#         'lego': 0.1,
+#         'materials': 0.1,
+#         'mic': 0.3,
+#         'ship': 0.18,
+#         'bicycle': 0.3,
+#         'bonsai': 0.24,
+#         'counter': 0.12,
+#         'garden': 0.18,
+#         'kitchen': 0.14,
+#         'room': 0.22,
+#         'stump': 0.2,
+#         'drjohnson': 0.41,
+#         'playroom': 0.0,
+#         'train': 0.12,
+#         'truck': 0.38
+#     }
+
+
+cb_const = 256
+prune_const = 0.66
+nerf_syn_small_config = {
+    'lseg': {
+        'chair': 1000000,
+        'drums': 1000000,
+        'ficus': 1000000,
+        'hotdog': 1000000,
+        'lego': 1000000,
+        'materials': 1000000,
+        'mic': 1000000,
+        'ship': 1000000
+    },
+    'cb': {
+        'chair': cb_const,
+        'drums': cb_const,
+        'ficus': cb_const,
+        'hotdog': cb_const,
+        'lego': cb_const,
+        'materials': cb_const,
+        'mic': cb_const,
+        'ship': cb_const
+    },
+    'depth': {
+        'chair': 12,
+        'drums': 12,
+        'ficus': 12,
+        'hotdog': 12,
+        'lego': 12,
+        'materials': 12,
+        'mic': 12,
+        'ship': 12
+    },
+    'prune': {
+        'chair': prune_const,
+        'drums': prune_const,
+        'ficus': prune_const,
+        'hotdog': prune_const,
+        'lego': prune_const,
+        'materials': prune_const,
+        'mic': prune_const,
+        'ship': prune_const
+    }
+}
+
+def evaluate_test(scene, dataset, pipe, background, iteration=0):
     model_path = dataset.model_path
     cams = scene.getTestCameras()
 
@@ -184,11 +679,9 @@ def evaluate_test(scene, dataset, pipe, background, iteration=0, skip_post_eval=
             training=False,
             raht=dataset.raht,
             debug=dataset.debug,
+            per_channel_quant=dataset.per_channel_quant,
+            per_block_quant=dataset.per_block_quant,
             clamp_color=True)["render"]
-
-        if skip_post_eval:
-            break
-        
         gt_image = viewpoint.original_image[0:3, :, :].to("cuda")
         # print(gt_image.max(), gt_image.min())
         torchvision.utils.save_image(image, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
@@ -207,10 +700,11 @@ def evaluate_test(scene, dataset, pipe, background, iteration=0, skip_post_eval=
 
 
 def training(dataset, opt, pipe, testing_iterations, given_ply_path=None):
+    # print('dataset.eval', dataset.eval)
     print('debug', dataset.debug)
 
     # magnify the lr scale of the covergence process is too slow.
-    opt.finetune_lr_scale = lr_scale_list[pipe.scene_name] * 4 
+    opt.finetune_lr_scale = lr_scale_list[pipe.scene_imp] * 4 
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, depth=dataset.depth, num_bits=dataset.num_bits)
     scene = Scene(dataset, gaussians, given_ply_path=given_ply_path)
@@ -220,8 +714,12 @@ def training(dataset, opt, pipe, testing_iterations, given_ply_path=None):
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    # nspd_mask = gaussians.check_spd()
+    # print('nspd_mask.shape', nspd_mask.shape)
+    
     with torch.no_grad():
         imp = cal_imp(gaussians, scene.getTrainCameras(), pipe, background)
+    # imp = cal_sens(gaussians, scene.getTrainCameras(), pipe, background)
 
     pmask = prune_mask(dataset.percent, imp)
     imp = imp[torch.logical_not(pmask)]
@@ -234,33 +732,30 @@ def training(dataset, opt, pipe, testing_iterations, given_ply_path=None):
         raht=dataset.raht
     )
     
-    gaussians.init_qas(dataset.lseg)
+    if dataset.per_block_quant:
+        gaussians.init_qas(dataset.n_block)
 
     gaussians.vq_fe(imp, dataset.codebook_size, dataset.batch_size, dataset.steps)
-    
-    print('Test Model (Post-training)...')
+        
+    print('Test Model (offline)...')
     with torch.no_grad():
         psnr_val, ssim_val, lpips_val = evaluate_test(
             scene,
             dataset,
             pipe,
             background,
-            iteration=0,
-            skip_post_eval=pipe.skip_post_eval
+            iteration=0
         )
-        zip_size = scene.save_ft("0")
+        zip_size = scene.save_ft("0", pipe, per_channel_quant=dataset.per_channel_quant, per_block_quant=dataset.per_block_quant)
         zip_size = zip_size / 1024 / 1024 # to MB
-        if pipe.skip_post_eval:
-            print("Size:", zip_size, 'MB')
-        else:
-            row = []
-            row.append(pipe.scene_name)
-            row.extend([0, psnr_val, ssim_val, lpips_val, zip_size])
-            f = open(dataset.csv_path, 'a+')
-            wtr = csv.writer(f)
-            wtr.writerow(row)
-            f.close()
-            print("Testset Evaluating {}. PSNR: {}, SSIM: {}, LIPIS: {}".format(0, psnr_val, ssim_val, lpips_val, zip_size))
+        row = []
+        row.append(pipe.scene_imp)
+        row.extend([0, psnr_val, ssim_val, lpips_val, zip_size])
+        f = open(dataset.csv_path, 'a+')
+        wtr = csv.writer(f)
+        wtr.writerow(row)
+        f.close()
+        print("Testset Evaluating {}. PSNR: {}, SSIM: {}, LIPIS: {}".format(0, psnr_val, ssim_val, lpips_val, zip_size))
     
     gaussians.finetuning_setup(opt)
 
@@ -294,6 +789,8 @@ def training(dataset, opt, pipe, testing_iterations, given_ply_path=None):
             training=True,
             raht=dataset.raht,
             debug=dataset.debug,
+            per_channel_quant=dataset.per_channel_quant,
+            per_block_quant=dataset.per_block_quant,
             clamp_color=dataset.clamp_color)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
@@ -328,16 +825,17 @@ def training(dataset, opt, pipe, testing_iterations, given_ply_path=None):
                 testing_iterations, 
                 scene, 
                 ft_render, 
-                pipe.scene_name, 
+                pipe.scene_imp, 
                 dataset.csv_path, 
                 dataset.model_path, 
                 (pipe, background, False, 1.0, None, 
-                 dataset.raht, False, True))
+                 dataset.raht, dataset.per_channel_quant, 
+                 dataset.per_block_quant, False, True))
             
             if cur_psnr > psnr_train:
                 psnr_train = cur_psnr
                 print("\n Saving best Gaussians on Train Set.")
-                scene.save_ft('best')
+                scene.save_ft('best', pipe, per_channel_quant=dataset.per_channel_quant, per_block_quant=dataset.per_block_quant)
  
             
             # Optimizer step
@@ -445,7 +943,7 @@ def training_report(
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
         
-        zip_size = scene.save_ft(iteration)
+        zip_size = scene.save_ft(iteration, pipe, per_channel_quant=dataset.per_channel_quant, per_block_quant=dataset.per_block_quant)
         zip_size = zip_size / 1024 / 1024
         
         row = []
@@ -465,12 +963,18 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    # parser.add_argument('--ip', type=str, default="127.0.0.1")
+    # parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000])
+    # parser.add_argument("--save_iterations", nargs="+", type=int, default=[200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--given_ply_path", default='', type=str)
     args = parser.parse_args(sys.argv[1:])
     args.test_iterations = [int(x) for x in range(0, args.iterations+1, 400)]
+    print('args.test_iterations', args.test_iterations)
+    
+    # args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
 
@@ -482,19 +986,26 @@ if __name__ == "__main__":
     dataset = lp.extract(args)
     pipe = pp.extract(args)
     
-    # # use given config
-    # if pipe.hyper_config == 'universal':
-    #     used_config = universal_config
-    # elif pipe.hyper_config == 'syn_small':
-    #     used_config = nerf_syn_small_config
-    # else:
-    #     used_config = None
-    # # use given config
-    # if used_config != None:
-    #     dataset.percent = used_config['prune'][pipe.scene_name]
-    #     dataset.codebook_size = used_config['cb'][pipe.scene_name]
-    #     dataset.lseg = used_config['lseg'][pipe.scene_name]
-    #     dataset.depth = used_config['depth'][pipe.scene_name]
+    # use given config
+    if pipe.hyper_config == 'universal':
+        used_config = universal_config
+    elif pipe.hyper_config == 'syn_small':
+        used_config = nerf_syn_small_config
+    elif pipe.hyper_config == 'config2':
+        used_config = config2
+    elif pipe.hyper_config == 'config3':
+        used_config = config3
+    else:
+        used_config = None
+    # use given config
+    
+    print('hyper_config', pipe.hyper_config)
+    if used_config != None:
+        dataset.percent = used_config['prune'][pipe.scene_imp]
+        dataset.codebook_size = used_config['cb'][pipe.scene_imp]
+        # dataset.lseg = used_config['lseg'][pipe.scene_imp]
+        dataset.depth = used_config['depth'][pipe.scene_imp]
+        dataset.n_block = used_config['n_block'][pipe.scene_imp]
         
     if not os.path.exists(dataset.csv_path):
         f = open(dataset.csv_path, 'a+')
@@ -505,4 +1016,4 @@ if __name__ == "__main__":
     training(dataset, op.extract(args), pipe, args.test_iterations, args.given_ply_path)
 
     # All done
-    print("\nFinetuning complete.")
+    print("\nTraining complete.")

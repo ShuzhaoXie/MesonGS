@@ -14,24 +14,49 @@ import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
-import shutil
-from raht_torch import (copyAsort, haar3D_param,
-                        inv_haar3D_param,
+
+from raht_torch import (copyAsort, get_RAHT_tree, haar3D_param,
+                        inv_haar3D_param, inv_haar3D_torch,
                         itransform_batched_torch, transform_batched_torch)
 from utils.general_utils import (build_rotation, build_scaling_rotation,
                                  get_expon_lr_func, inverse_sigmoid,
                                  strip_symmetric)
 from utils.graphics_utils import BasicPointCloud
-from utils.quant_utils import VanillaQuan
+from utils.quant_utils import VanillaQuan, split_length
 from utils.sh_utils import RGB2SH
 from utils.system_utils import mkdir_p
 from vq import vq_features
 
+
+def solve_xy(z: int):
+    '''
+    output: x, y
+    min abs(x-y)
+    s.t. 7x + 3y = z, x \in N, y \in N
+    '''
+    xs = np.arange(z//7).astype(np.int32)
+    l1 = z - (xs * 7) 
+    mod_l1 = l1 % 3
+    ck_bool = mod_l1 == 0
+    yu_l1 = l1 // 3
+    solve_y = yu_l1[ck_bool]
+    solve_xs = xs[ck_bool]
+    
+    abs_y_x = abs(solve_y - solve_xs)
+    
+    min_ind = np.argmin(abs_y_x)
+    
+    return solve_xs[min_ind], solve_y[min_ind]
+
+
 def d1halfing_fast(pmin,pmax,pdepht):
     return np.linspace(pmin,pmax,2**int(pdepht)+1)
+
+# quantize code
 
 def ToEulerAngles_FT(q):
 
@@ -94,6 +119,19 @@ def quantize_tensor(x, scale, zero_point, num_bits=8, signed=False):
 def dequantize_tensor(q_x, scale, zero_point):
     return scale * (q_x - zero_point)
 
+def transmission(x, num_bits):
+    # print('in transmission')
+    start = time.time()
+    max_val = x.max()
+    # print('max_val', max_val)
+    min_val = x.min()
+    # print('min_val', min_val)
+    scale, zero_point = calcScaleZeroPoint(min_val, max_val, num_bits=num_bits)
+    x = quantize_tensor(x, scale, zero_point, num_bits=num_bits)
+    x = dequantize_tensor(x, scale, zero_point)
+    store_size = x.element_size() * x.nelement() * num_bits / 32
+    return x, time.time() - start, store_size
+
 def build_rotation_from_euler(roll, pitch, yaw):
     R = torch.zeros((roll.size(0), 3, 3), device='cuda')
 
@@ -108,6 +146,9 @@ def build_rotation_from_euler(roll, pitch, yaw):
     R[:, 2, 2] = torch.cos(yaw) * torch.cos(pitch)
 
     return R
+
+def d1halfing_fast(pmin,pmax,pdepht):
+    return np.linspace(pmin,pmax,2**int(pdepht)+1)
                        
 def octreecodes(ppoints, pdepht, merge_type='mean',imps=None):
     minx=np.amin(ppoints[:,0])
@@ -224,6 +265,24 @@ def torch_vanilla_quant(x, lseg, qas):
         cnt+=1
     return np.concatenate(outs, axis=0), trans
 
+def torch_vanilla_quant_ave(x, split, qas):
+    start = 0
+    cnt = 0
+    outs = []
+    trans = []
+    for length in split:
+        i_scale = qas[cnt].scale
+        i_zp = qas[cnt].zero_point
+        i_bit = qas[cnt].bit
+        outs.append(quantize_tensor(
+            x[start:start+length], 
+            scale=i_scale,
+            zero_point=i_zp,
+            num_bits=i_bit).cpu().numpy()) 
+        trans.extend([i_scale.item(), i_zp.item()])
+        cnt += 1
+        start += length
+    return np.concatenate(outs, axis=0), trans
 
 def torch_vanilla_dequant(x, lseg, sz):
     lx = x.shape[0]
@@ -246,6 +305,23 @@ def torch_vanilla_dequant(x, lseg, sz):
         cnt+=2
     return torch.concat(outs, axis=0)
 
+def torch_vanilla_dequant_ave(x, split, sz):
+    cnt = 0 
+    start = 0
+    outs = []
+    for length in split:
+        i_scale = sz[cnt]
+        i_zp = sz[cnt+1]
+        outs.append(
+            dequantize_tensor(
+                x[start:start+length],
+                scale=i_scale,
+                zero_point=i_zp
+            )
+        )
+        cnt+=2
+        start += length
+    return torch.concat(outs, axis=0)
 
 def decode_oct(paramarr, oct, depth):
     minx=(paramarr[0])
@@ -442,6 +518,7 @@ class GaussianModel:
         # pmd_e = self._check_spd_cov(cov_e)
         print("rotation spd ratio: ", pdm_r.sum() / num)
         return pdm_r
+        # print("euler spd ratio: ", pmd_e.sum() / num)
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -452,13 +529,21 @@ class GaussianModel:
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         print('create_from_pcd fused_point_cloud.shape', fused_point_cloud.shape)
         tmp_pcd_color = torch.tensor(np.asarray(pcd.colors)).float().cuda()
+        # print('create_from_pcd tmp_pcd_color.shape', tmp_pcd_color.shape)
         fused_color = RGB2SH(tmp_pcd_color)
-
+        # print('create_from_pcd fused_color.shape', fused_color.shape)
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features[:, :3, 0 ] = fused_color
+        # print('create_from_pcd features.shape', features.shape)
         features[:, 3:, 1:] = 0.0
+        # print('create_from_pcd features.shape', features.shape)
+
+        # print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
+        # print('create_from_pcd dist2.shape', dist2.shape)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+        # print('create_from_pcd scales.shape', scales.shape)
 
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
@@ -467,11 +552,14 @@ class GaussianModel:
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        # print('create_from_pcd _features_dc.shape', self._features_dc.shape)
         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        # print('create_from_pcd _features_rest.shape', self._features_rest.shape)
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        # print('create_from_pcd max_radii2D.shape', self.max_radii2D.shape)
     
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -584,7 +672,26 @@ class GaussianModel:
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
 
-    def save_npz(self, exp_dir):
+    def save_ft_ply(self, path):
+        mkdir_p(os.path.dirname(path))
+
+        xyz = self._xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self.get_indexed_feature_extra.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self._opacity.detach().cpu().numpy()
+        scale = self._scaling.detach().cpu().numpy()
+        rotation = self._rotation.detach().cpu().numpy()
+
+        dtype_full = [(attribute, 'f4') for attribute in self.ft_construct_list_of_attributes(f_rest.shape[1])]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
+
+    def save_full_npz(self, exp_dir, pipe, per_channel_quant=False, per_block_quant=False):
         
         os.makedirs(exp_dir, exist_ok=True)
         bin_dir = os.path.join(exp_dir, 'bins')
@@ -592,22 +699,26 @@ class GaussianModel:
         trans_array = []
         trans_array.append(self.depth)
         trans_array.append(self.lseg)
+        
+        scale_offset = 7
 
         with torch.no_grad():
-            np.savez_compressed(os.path.join(bin_dir , 'oct'), points=self.oct, params=self.oct_param)
-
+            print('type(self.oct)', type(self.oct), max(self.oct))
             ntk = self._feature_indices.detach().contiguous().cpu().int().numpy()
             cb = self._features_rest.detach().contiguous().cpu().numpy()
             # print('cb.shape', cb.shape)
-            np.savez_compressed(os.path.join(bin_dir , 'ntk.npz'), ntk=ntk)
-            np.savez_compressed(os.path.join(bin_dir , 'um.npz'), umap=cb)
-            
+                        
             r = self.get_ori_rotation
             norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
             q = r / norm[:, None]
             eulers = ToEulerAngles_FT(q)
             
             rf = torch.concat([self.get_origin_opacity.detach(), eulers.detach(), self.get_features_dc.detach().contiguous().squeeze()], axis=-1)
+            
+            # '''ckpt'''
+            # rf_cpu = rf.cpu().numpy()
+            # np.save('duipai/rf_cpu.npy', rf_cpu)
+            # ''''''
             
             C = rf[self.reorder]
             iW1 = self.res['iW1']
@@ -641,12 +752,9 @@ class GaussianModel:
                 trans_array.extend(trans1)
                 qa_cnt += blocks_in_channel
             qci = np.concatenate(qci, axis=-1)
-                
-            np.savez_compressed(os.path.join(bin_dir,'orgb.npz'), f=cf, i=qci.astype(np.uint8))
             
-        
+            
             scaling = self.get_ori_scaling.detach()
-
             lc1 = scaling.shape[0]
             scaling_q = []
             if lc1 % self.lseg == 0:
@@ -659,7 +767,181 @@ class GaussianModel:
                 # .reshape(-1, 1)
                 trans_array.extend(trans1)
                 qa_cnt += blocks_in_channel
-            scaling_q = np.concatenate(scaling_q, axis=-1)
+            scaling_q = np.concatenate(scaling_q, axis=-1)            
+            
+            trans_array = np.array(trans_array)
+            
+            np.savez_compressed(
+                os.path.join(bin_dir, 'full'),
+                oct=self.oct,
+                op=self.oct_param,
+                ntk=ntk,
+                umap=cb,
+                of=cf,
+                oi=qci.astype(np.uint8),
+                sq=scaling_q.astype(np.uint8),
+                t=trans_array
+            )
+            
+            npz_file_size = os.path.getsize(os.path.join(bin_dir, 'full.npz'))    
+            print('npz_file_size', npz_file_size, 'B')
+            print('npz_file_size', npz_file_size / 1024 / 1024, 'MB')  
+            # np.savez_compressed(os.path.join(bin_dir , 'oct'), points=self.oct, params=self.oct_param)
+            # np.savez_compressed(os.path.join(bin_dir , 'ntk.npz'), ntk=ntk)
+            # np.savez_compressed(os.path.join(bin_dir , 'um.npz'), umap=cb)
+            # np.savez_compressed(os.path.join(bin_dir,'orgb.npz'), f=cf, i=qci.astype(np.uint8))
+            # np.savez_compressed(os.path.join(bin_dir,'ct.npz'), i=scaling_q.astype(np.uint8))
+            # np.savez_compressed(os.path.join(bin_dir, 't.npz'), t=trans_array)
+
+            bin_zip_name = bin_dir.split('/')[-1]
+            bin_zip_path = os.path.join(exp_dir, f'{bin_zip_name}.zip')
+            os.system(f'zip -j {bin_zip_path} {bin_dir}/*')
+
+            zip_file_size = os.path.getsize(bin_zip_path)
+
+            print('final sum:', zip_file_size , 'B')
+            print('final sum:', zip_file_size / 1024, 'KB')
+            print('final sum:', zip_file_size / 1024 / 1024, 'MB')
+            
+    def save_npz(self, exp_dir, pipe, per_channel_quant=False, per_block_quant=False):
+        
+        os.makedirs(exp_dir, exist_ok=True)
+        bin_dir = os.path.join(exp_dir, 'bins')
+        os.makedirs(bin_dir, exist_ok=True)
+        trans_array = []
+        trans_array.append(self.depth)
+        trans_array.append(self.n_block)
+        
+        scale_offset = 7
+
+        with torch.no_grad():
+            # print('type(self.oct)', type(self.oct), max(self.oct))
+            np.savez_compressed(os.path.join(bin_dir , 'oct'), points=self.oct, params=self.oct_param)
+            # print('self.oct.shape', self.oct.shape)
+            # print('self.oct.shape', self.oct.shape)
+            # ntk, 1-D
+            # cb: cb_size * 45
+            ntk = self._feature_indices.detach().contiguous().cpu().int().numpy()
+            cb = self._features_rest.detach().contiguous().cpu().numpy()
+            # print('cb.shape', cb.shape)
+            np.savez_compressed(os.path.join(bin_dir , 'ntk.npz'), ntk=ntk)
+            np.savez_compressed(os.path.join(bin_dir , 'um.npz'), umap=cb)
+            
+            r = self.get_ori_rotation
+            norm = torch.sqrt(r[:,0]*r[:,0] + r[:,1]*r[:,1] + r[:,2]*r[:,2] + r[:,3]*r[:,3])
+            q = r / norm[:, None]
+            eulers = ToEulerAngles_FT(q)
+            
+            rf = torch.concat([self.get_origin_opacity.detach(), eulers.detach(), self.get_features_dc.detach().contiguous().squeeze()], axis=-1)
+            
+            # '''ckpt'''
+            # rf_cpu = rf.cpu().numpy()
+            # np.save('duipai/rf_cpu.npy', rf_cpu)
+            # ''''''
+            
+            C = rf[self.reorder]
+            iW1 = self.res['iW1']
+            iW2 = self.res['iW2']
+            iLeft_idx = self.res['iLeft_idx']
+            iRight_idx = self.res['iRight_idx']
+
+            for d in range(self.depth * 3):
+                w1 = iW1[d]
+                w2 = iW2[d]
+                left_idx = iLeft_idx[d]
+                right_idx = iRight_idx[d]
+                C[left_idx], C[right_idx] = transform_batched_torch(w1, 
+                                                    w2, 
+                                                    C[left_idx], 
+                                                    C[right_idx])
+
+            cf = C[0].cpu().numpy()
+
+            if per_channel_quant:
+                qci = []
+                dqci = []
+                for i in range(C.shape[-1]):
+                    q_tensor_i = quantize_tensor(
+                                x=C[1:, i],
+                                scale=self.qas[i].scale,
+                                zero_point=self.qas[i].zero_point,
+                                num_bits=self.qas[i].bit
+                                ).cpu().numpy().reshape(-1, 1)
+                    qci.append(
+                        q_tensor_i
+                    )
+
+                    dqci.append(
+                        (q_tensor_i.astype(np.float32) - self.qas[i].zero_point.item()) * self.qas[i].scale.item()
+                    )
+
+                    trans_array.append(self.qas[i].scale.item())
+                    trans_array.append(self.qas[i].zero_point.item())
+
+                qci = np.concatenate(qci, axis=-1)
+                dqci = np.concatenate(dqci, axis=-1)
+            elif per_block_quant:
+                # TODO: Shuzhao
+                qa_cnt = 0
+                lc1 = C.shape[0] - 1
+                qci = [] 
+                split = split_length(lc1, self.n_block)
+                for i in range(C.shape[-1]):
+                    t1, trans1 = torch_vanilla_quant_ave(C[1:, i], split, self.qas[qa_cnt : qa_cnt + self.n_block])
+                    qci.append(t1)
+                    # .reshape(-1, 1)
+                    trans_array.extend(trans1)
+                    qa_cnt += self.n_block
+                qci = np.concatenate(qci, axis=-1)
+            else:
+                qci = quantize_tensor(
+                    C[1:],
+                    scale=self.qa.scale,
+                    zero_point=self.qa.zero_point,
+                    num_bits=self.qa.bit
+                ).cpu().numpy()
+                trans_array.append(self.qa.scale.item())
+                trans_array.append(self.qa.zero_point.item())
+                
+            np.savez_compressed(os.path.join(bin_dir,'orgb.npz'), f=cf, i=qci.astype(np.uint8))
+            
+            if per_channel_quant:
+                scaling = self.get_ori_scaling.detach()
+                scaling_q = []
+                for i in range(scale_offset, scale_offset+3):
+                    scaling_q.append(
+                        torch.quantize_per_tensor(
+                            scaling[:, i-scale_offset],
+                            scale=self.qas[i].scale,
+                            zero_point=self.qas[i].zero_point,
+                            dtype=self.qas[i].dtype
+                            ).int_repr().cpu().numpy().reshape(-1, 1)
+                    )
+                    trans_array.append(self.qas[i].scale.item())
+                    trans_array.append(self.qas[i].zero_point.item())
+                scaling_q = np.concatenate(scaling_q, axis=-1)
+            elif per_block_quant:
+                scaling = self.get_ori_scaling.detach()
+                lc1 = scaling.shape[0]
+                scaling_q = []
+                split_scale = split_length(lc1, self.n_block)
+                for i in range(scaling.shape[-1]):
+                    t1, trans1 = torch_vanilla_quant_ave(scaling[:, i], split_scale, self.qas[qa_cnt : qa_cnt + self.n_block])
+                    scaling_q.append(t1)
+                    # .reshape(-1, 1)
+                    trans_array.extend(trans1)
+                    qa_cnt += self.n_block
+                scaling_q = np.concatenate(scaling_q, axis=-1)
+            else:
+                scaling_q = torch.quantize_per_tensor(
+                    self.get_ori_scaling.detach(),
+                    scale=self.scale_qa.scale,
+                    zero_point=self.scale_qa.zero_point,
+                    dtype=self.scale_qa.dtype,
+                ).int_repr().cpu().numpy()
+                trans_array = np.concatenate([trans_array, self.scale_qa.scale.cpu().numpy().reshape(-1)])
+                trans_array = np.concatenate([trans_array, self.scale_qa.zero_point.cpu().numpy().reshape(-1)])
+            
 
             np.savez_compressed(os.path.join(bin_dir,'ct.npz'), i=scaling_q.astype(np.uint8))
             
@@ -676,32 +958,12 @@ class GaussianModel:
             print('final sum:', zip_file_size / 1024, 'KB')
             print('final sum:', zip_file_size / 1024 / 1024, 'MB')
 
-    def init_qas(self, lseg):
-        lc = self._xyz.shape[0]
-        n_qs = 0
-        rf_base = 7
-        
-        if lseg > lc:
-            print('lseg > lc, set lseg == lc.')
-            lseg = lc
-        
-        '''cal number of qas for opa, rot/euler, and SH0'''
-        if (lc - 1) % lseg == 0:
-            n_qs += (((lc - 1) // lseg)) * rf_base
-        else:
-            n_qs += (((lc - 1) // lseg) + 1) * rf_base
-        
-        '''cal number of qas for scale'''
-        if lc % lseg == 0:
-            n_qs += (lc // lseg) * 3
-        else:
-            n_qs += ((lc // lseg) + 1) * 3
-        # n_qs = ((lc-1) // lseg + 1) * 7 + (lc // lseg + 1)*3
-        
+    def init_qas(self, n_block):
+        self.n_block = n_block
+        n_qs = 10 * n_block
         self.qas = nn.ModuleList([])
         for i in range(n_qs): 
             self.qas.append(VanillaQuan(bit=8).cuda())
-        self.lseg = lseg
         print('Init qa, length:', n_qs)
 
     def reset_opacity(self):
@@ -711,16 +973,18 @@ class GaussianModel:
 
     def load_ply(self, path, og_number_points=-1, spatial_lr_scale=-1):
         self.spatial_lr_scale = spatial_lr_scale
+        print('now I am loading ply, spatial_lr_scale is', spatial_lr_scale)
         self.og_number_points = og_number_points
         plydata = PlyData.read(path)
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
+        print('xyz.shape', xyz.shape)
         self.og_number_points = xyz.shape[0]
-
+        # print('xyz[0]', xyz[0])
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
-
+        print('opacities save shape', opacities.shape)
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -764,7 +1028,10 @@ class GaussianModel:
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
+        print('xyz.shape', xyz.shape)
+        # print('xyz[0]', xyz[0])
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        print('opacities save shape', opacities.shape)
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -783,6 +1050,7 @@ class GaussianModel:
         covs = np.zeros((xyz.shape[0], len(cov_names)))
         for idx, attr_name in enumerate(cov_names):
             covs[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        print('covs save shape', covs.shape)
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(False))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(False))
@@ -793,14 +1061,18 @@ class GaussianModel:
 
 
     def load_ft_rots(self, path, og_number_points=-1):
+        # print('now I am loading ply')
         self.og_number_points = og_number_points
         plydata = PlyData.read(path)
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
+        # print('xyz.shape', xyz.shape)
         self.og_number_points = xyz.shape[0]
+        # print('xyz[0]', xyz[0])
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        # print('opacities save shape', opacities.shape)
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -819,11 +1091,13 @@ class GaussianModel:
         scales = np.zeros((xyz.shape[0], len(scale_names)))
         for idx, attr_name in enumerate(scale_names):
             scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        print('scales save shape', scales.shape)
 
         rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
         rots = np.zeros((xyz.shape[0], len(rot_names)))
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        print('rot save shape', rots.shape)
         
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
@@ -874,17 +1148,8 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
     
     def load_npz(self, exp_dir):
-        if exp_dir[-4:] == '.zip':
-            print('Assume the input file path is a .zip file')
-            bin_dir = os.path.join(exp_dir[:-8], 'bins_tmp')
-            if os.path.exists(bin_dir):
-                shutil.rmtree(bin_dir)
-            os.system(f'unzip {exp_dir} -d {bin_dir}')
-        else:
-            print('Assume the input file path is a dir that contains a \'bins\' dir')
-            bin_dir = os.path.join(exp_dir, 'bins')
-        
-        print('load ply from:', bin_dir)
+        bin_dir = os.path.join(exp_dir, 'bins')
+        print('bin_dir', bin_dir)
         trans_array = np.load(os.path.join(bin_dir, 't.npz'))["t"]
         
         depth = int(trans_array[0])
@@ -927,51 +1192,58 @@ class GaussianModel:
         # q_orgb_i = torch.tensor(oef_vals["i"].astype(np.float32), dtype=torch.float, device="cuda").reshape(-1, 7)
         # q_scale_i = torch.tensor(np.load(os.path.join(bin_dir, 'ct.npz'))["i"], dtype=torch.float, device="cuda").reshape(-1, 3)
         
-        # print('rf_orgb_f size', orgb_f.shape)
-        # print('q_rf_orgb_i.shape', q_orgb_i.shape)
-        # print('q_scale_i.shape', q_scale_i.shape)
+        print('rf_orgb_f size', orgb_f.shape)
+        print('q_rf_orgb_i.shape', q_orgb_i.shape)
+        print('q_scale_i.shape', q_scale_i.shape)
         
         
-        lseg = int(trans_array[1])
-        self.lseg = lseg
+        # lseg = int(trans_array[1])
+        # self.lseg = lseg
+        n_block = int(trans_array[1])
+        self.n_block = n_block
         
         '''dequant'''
         qa_cnt = 2
         rf_orgb = []
         rf_len = q_orgb_i.shape[0]
+        # print('rf_len, n_points', rf_len, n_points)
         assert rf_len + 1 == n_points
-        if rf_len % self.lseg == 0:
-            n_rf = rf_len // self.lseg
-        else:
-            n_rf = rf_len // self.lseg + 1
+        # if rf_len % self.lseg == 0:
+        #     n_rf = rf_len // self.lseg
+        # else:
+        #     n_rf = rf_len // self.lseg + 1
+        split = split_length(rf_len, n_block)
         for i in range(7):
-            rf_i = torch_vanilla_dequant(q_orgb_i[:, i], lseg, trans_array[qa_cnt:qa_cnt+2*n_rf])
+            rf_i = torch_vanilla_dequant_ave(q_orgb_i[:, i], split, trans_array[qa_cnt:qa_cnt+2*n_block])
+            # print('rf_i.shape', rf_i.shape)
             rf_orgb.append(rf_i.reshape(-1, 1))
-            qa_cnt += 2*n_rf
-        rf_orgb = torch.concat(rf_orgb, axis=-1)
+            qa_cnt += 2*n_block
+        rf_orgb = torch.concat(rf_orgb, dim=-1)
         
         
         de_scale = []
         scale_len = q_scale_i.shape[0]
         assert scale_len == n_points
-        if scale_len % self.lseg == 0:
-            n_scale = scale_len // self.lseg
-        else:
-            n_scale = scale_len // self.lseg + 1
+        # if scale_len % self.lseg == 0:
+        #     n_scale = scale_len // self.lseg
+        # else:
+        #     n_scale = scale_len // self.lseg + 1
+        scale_split = split_length(scale_len, n_block)
         for i in range(3):
-            scale_i = torch_vanilla_dequant(q_scale_i[:, i], lseg, trans_array[qa_cnt:qa_cnt+2*n_scale])
+            scale_i = torch_vanilla_dequant_ave(q_scale_i[:, i], scale_split, trans_array[qa_cnt:qa_cnt+2*n_block])
             de_scale.append(scale_i.reshape(-1, 1))
-            qa_cnt += 2*n_scale
+            qa_cnt += 2*n_block
         de_scale = torch.concat(de_scale, axis=-1).to("cuda")
         self._scaling = nn.Parameter(de_scale.requires_grad_(False))
         
-        # print('qa_cnt', qa_cnt, 'trans', trans_array.shape)
-        # print('rf_orgb.shape, de_scale.shape', rf_orgb.shape, de_scale.shape)
+        print('qa_cnt', qa_cnt, 'trans', trans_array.shape)
+        print('rf_orgb.shape, de_scale.shape', rf_orgb.shape, de_scale.shape)
         
         C = torch.concat([orgb_f.reshape(1, -1), rf_orgb], 0)
         
         w, val, reorder = copyAsort(V)
 
+        # print('saving 2')
         self.reorder = reorder  
         res_inv = inv_haar3D_param(V, depth)
         pos = res_inv['pos']
@@ -1011,16 +1283,19 @@ class GaussianModel:
 
         raht_features[reorder] = OC
         
+        # rf_chk = torch.tensor(np.load('/home/szxie/mesongs/duipai/rf_cpu.npy'), dtype=torch.float, device='cuda')
+        # print(torch.sum(torch.square(rf_chk - raht_features)))
+        
+        # scale_chk = torch.tensor(np.load('/home/szxie/mesongs/duipai/scale_cpu.npy'), dtype=torch.float, device='cuda')
+        # print(torch.sum(torch.square(scale_chk - de_scale)))
+        
         self._opacity = nn.Parameter(raht_features[:, :1].requires_grad_(False))
-        self._euler = nn.Parameter(raht_features[:, 1:4].requires_grad_(False))
+        self._euler = nn.Parameter(raht_features[:, 1:4].nan_to_num_(0).requires_grad_(False))
         self._features_dc = nn.Parameter(raht_features[:, 4:].unsqueeze(1).requires_grad_(False))
+        # print('max euler', torch.max(self._euler))
         
         self.active_sh_degree = self.max_sh_degree
         
-        if exp_dir[-4:] == '.zip':
-            os.system(f'rm -rf {bin_dir}')
-            
-
     def vq_fe(self, imp, codebook_size, batch_size, steps):
         features_extra = self._features_rest.detach().flatten(-2)
         codebook, vq_indices = vq_features(
@@ -1033,8 +1308,6 @@ class GaussianModel:
 
         self._feature_indices = nn.Parameter(vq_indices.detach().contiguous(), requires_grad=False)
         self._features_rest = nn.Parameter(codebook.detach().contiguous(), requires_grad=True)
-        
-        
 
     def load_ply_euler(self, path, og_number_points=-1):
         self.og_number_points = og_number_points
@@ -1080,6 +1353,7 @@ class GaussianModel:
         self._euler = nn.Parameter(torch.tensor(eulers, dtype=torch.float, device="cuda").requires_grad_(False))
         self.active_sh_degree = self.max_sh_degree
     
+
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:

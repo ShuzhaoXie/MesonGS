@@ -54,19 +54,23 @@ class ModelParams(ParamGroup):
         self._resolution = -1
         self._white_background = False
         self.eval = False
+        self.codeft = False
+        self.no_simulate = False
         self.oct_merge = "mean"
         self.codebook_size=2048
         self.batch_size=262144
-        self.steps=200
+        self.steps=100
         self.raht=True
-        self.percent=0.3
+        self.percent=0.66
+        self.per_channel_quant=False
+        self.per_block_quant=True
         self.clamp_color=True 
         self.meson_count=False 
         self.f_count=False
         self.debug=False
-        self.lseg=4000
+        self.lseg=-1
         self.csv_path=''
-        self.depth=14
+        self.depth=12
         self.num_bits=8
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -79,18 +83,21 @@ class PipelineParams(ParamGroup):
     def __init__(self, parser):
         self.convert_SHs_python = True
         self.compute_cov3D_python = False
-        # self.save_imp = False
+        self.save_imp = False
         self.use_indexed = True
         self.depth_count = False
-        self.skip_post_eval = False
-        # self.save_mode = 'euler'
-        self.scene_name = ""
-        # self.save_ft_type=""
+        self.save_mode = 'euler'
+        self.scene_imp = ""
+        self.not_update_rot = False
+        self.skip_quant_rot = False
+        self.hyper_config = "universal"
+        self.save_ft_type=""
+        self.n_block=66
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 4000
+        self.iterations = 30_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
@@ -136,7 +143,16 @@ def get_combined_args_render(parser : ArgumentParser):
     cmdlne_string = sys.argv[1:]
     cfgfile_string = "Namespace()"
     args_cmdline = parser.parse_args(cmdlne_string)
-    
+
+    # try:
+    #     cfgfilepath = os.path.join(args_cmdline.model_path, "cfg_args")
+    #     print("Looking for config file in", cfgfilepath)
+    #     with open(cfgfilepath) as cfg_file:
+    #         print("Config file found: {}".format(cfgfilepath))
+    #         cfgfile_string = cfg_file.read()
+    # except TypeError:
+    #     print("Config file not found at")
+    #     pass
     args_cfgfile = eval(cfgfile_string)
 
     merged_dict = vars(args_cfgfile).copy()

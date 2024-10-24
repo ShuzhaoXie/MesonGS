@@ -4,6 +4,12 @@ import torch
 import torch.nn as nn
 from torch.autograd import Function
 
+def split_length(length, n):
+    base_length = length / n
+    floor_length = int(base_length)
+    remainder = length - (floor_length * n)
+    result = [floor_length + 1] * remainder + [floor_length] * (n - remainder)
+    return result
 
 class Round(Function):
     @staticmethod

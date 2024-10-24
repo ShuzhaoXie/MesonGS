@@ -26,3 +26,5 @@ mesh_output/*
 *.dump
 data
 data/*
+scripts/mesongs_mip360.sh
+scripts/render_test.sh

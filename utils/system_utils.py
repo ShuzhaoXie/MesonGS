@@ -29,3 +29,4 @@ def searchForMaxIteration(folder):
     return max(saved_iters)
 
 MAIN_DIR='/your/path/to/mesongs'
+# MAIN_DIR='/home/szxie/mesongs_os'
